@@ -26,9 +26,9 @@ st.sidebar.info(f"**Activo Institucional:** `{ticker}` (SPDR Gold Trust)")
 
 days_back = st.sidebar.slider(
     "Días de Histórico (Velas 5m):",
-    min_value=7,
-    max_value=60,
-    value=60,
+    min_value=5,
+    max_value=59,
+    value=30,
     step=1
 )
 
@@ -43,15 +43,30 @@ tp_min_pct = st.sidebar.number_input("Take Profit Mínimo (%):", value=0.80, ste
 st.sidebar.button("🔄 Actualizar Datos de Mercado")
 
 # ==========================================
-# CARGA Y PROCESAMIENTO DE DATOS
+# CARGA ROBUSTA DE DATOS (CON FALLBACK)
 # ==========================================
 @st.cache_data(ttl=120)
 def load_gold_data(sym, days):
-    raw = yf.download(sym, period=f"{days}d", interval="5m", progress=False)
+    period_str = f"{min(days, 59)}d"
+    
+    # Intento 1: yf.Ticker().history() (Más robusto en Streamlit Cloud)
+    try:
+        t = yf.Ticker(sym)
+        raw = t.history(period=period_str, interval="5m", auto_adjust=False)
+    except Exception:
+        raw = pd.DataFrame()
+        
+    # Intento 2: yf.download() como fallback
+    if raw.empty:
+        try:
+            raw = yf.download(sym, period=period_str, interval="5m", progress=False, auto_adjust=False)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+        except Exception:
+            raw = pd.DataFrame()
+
     if raw.empty:
         return pd.DataFrame()
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
 
     df = pd.DataFrame(index=raw.index)
     df['open'] = raw['Open']
@@ -59,6 +74,10 @@ def load_gold_data(sym, days):
     df['low'] = raw['Low']
     df['close'] = raw['Close']
     df['volume'] = raw['Volume']
+    df = df.dropna()
+
+    if df.empty:
+        return pd.DataFrame()
 
     # Normalización horaria a Nueva York (EST)
     if df.index.tz is None:
@@ -72,7 +91,7 @@ def load_gold_data(sym, days):
     # Ventana de Alta Liquidez: 08:00 a 13:30 EST (480 a 810 min)
     df['in_rth'] = (df['time_min'] >= 480) & (df['time_min'] <= 810)
 
-    # 1. VWAP Acumulado de la Sesión
+    # 1. VWAP Acumulado de Sesión
     df['tp'] = (df['high'] + df['low'] + df['close']) / 3
     df['tp_vol'] = df['tp'] * df['volume']
     df['cum_vol'] = df.groupby('date')['volume'].cumsum()
@@ -105,7 +124,7 @@ def load_gold_data(sym, days):
 df = load_gold_data(ticker, days_back)
 
 if df.empty:
-    st.error(f"No se pudieron obtener datos para {ticker}.")
+    st.error(f"No se pudieron obtener datos para {ticker}. Intenta reducir los días a 30 o hacer clic en Actualizar.")
     st.stop()
 
 # ==========================================
@@ -151,7 +170,7 @@ for i in range(len(df)):
             trades.append(-sl_pct)
             exit_timestamps.append(df.index[i])
             exit_prices.append(sl_price)
-            trade_motives.append("SL (-0.50%)")
+            trade_motives.append(f"SL (-{sl_pct*100:.2f}%)")
             in_pos = False
         # Timeout (100 min)
         elif bars >= 20:
